@@ -14,15 +14,71 @@ from google.protobuf.message import DecodeError
 import base64
 
 app = Flask(__name__)
+UIDPASS_FILE = "uidpass.json"
+TOKEN_FILE = "tokens.json"
+TOKEN_API_URL = "https://xtytdtyj-jwt.up.railway.app/token"
 
 def load_tokens():
     try:
-        with open("tokens.json", "r") as f:
+        with open(TOKEN_FILE, "r", encoding="utf-8") as f:
             tokens = json.load(f)
         return tokens
     except Exception as e:
         app.logger.error(f"Error loading tokens: {e}")
         return None
+
+def load_uidpass():
+    try:
+        with open(UIDPASS_FILE, "r", encoding="utf-8") as f:
+            uidpass_list = json.load(f)
+        return uidpass_list
+    except Exception as e:
+        app.logger.error(f"Error loading uidpass: {e}")
+        return []
+
+def fetch_token(uid, password):
+    url = f"{TOKEN_API_URL}?uid={uid}&password={password}"
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("token")
+    except Exception as e:
+        app.logger.error(f"Error fetching token for UID {uid}: {e}")
+        return None
+
+def update_token_file(token_list):
+    try:
+        with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+            json.dump(token_list, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        app.logger.error(f"Error writing tokens: {e}")
+
+def sync_tokens_from_uidpass(force=False):
+    uidpass_list = load_uidpass()
+    if not uidpass_list:
+        return load_tokens() or []
+
+    existing_tokens = load_tokens() or []
+    if not force and len(existing_tokens) == len(uidpass_list):
+        return existing_tokens
+
+    fresh_tokens = []
+    for item in uidpass_list:
+        uid = item.get("uid")
+        password = item.get("password")
+        if not uid or not password:
+            app.logger.warning(f"Skipping invalid uidpass entry: {item}")
+            continue
+        token = fetch_token(uid, password)
+        if token:
+            fresh_tokens.append({"uid": uid, "token": token})
+
+    if fresh_tokens:
+        update_token_file(fresh_tokens)
+        return fresh_tokens
+
+    return existing_tokens
 
 def encrypt_message(plaintext):
     try:
@@ -82,7 +138,7 @@ async def send_multiple_requests(uid, server_name, url):
             app.logger.error("Encryption failed.")
             return None
         tasks = []
-        tokens = load_tokens()
+        tokens = sync_tokens_from_uidpass()
         if tokens is None:
             app.logger.error("Failed to load tokens.")
             return None
@@ -173,10 +229,12 @@ def handle_requests():
         return jsonify({"error": "UID is required"}), 400
 
     try:
-        tokens = load_tokens()
+        tokens = sync_tokens_from_uidpass()
         if tokens is None or not tokens:
             return jsonify({"error": "Failed to load tokens."}), 500
         token = tokens[0]['token']
+        configured_accounts = len(load_uidpass())
+        working_tokens = len(tokens)
         
         # Extract server_name (lock_region) from token if not provided
         server_name = request.args.get("server_name", "").upper()
@@ -233,12 +291,14 @@ def handle_requests():
         
         return jsonify({
             "credit": "https://t.me/paglu_dev",
+            "ConfiguredAccounts": configured_accounts,
             "LikesGivenByAPI": like_given,
             "LikesafterCommand": after_like,
             "LikesbeforeCommand": before_like,
             "PlayerNickname": player_name,
             "Region": server_name,
             "UID": player_uid,
+            "WorkingTokens": working_tokens,
             "status": 1 if like_given > 0 else 2
         })
     except Exception as e:
